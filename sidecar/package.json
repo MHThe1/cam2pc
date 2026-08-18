@@ -1,0 +1,10 @@
+{
+  "name": "cam2pc-ndi-bridge",
+  "version": "0.1.0",
+  "description": "NDI output sidecar for Cam2PC — receives RGBA frames and broadcasts as NDI source",
+  "main": "ndi-bridge.js",
+  "license": "MIT",
+  "optionalDependencies": {
+    "grandiose": "^0.3.4"
+  }
+}

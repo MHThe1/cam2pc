@@ -1,0 +1,31 @@
+# Cam2PC — Node / Build artifacts
+node_modules/
+dist/
+
+# Tauri build output
+src-tauri/target/
+
+# Generated SSL certificates (machine-specific)
+src-tauri/certs/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
