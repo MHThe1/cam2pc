@@ -24,6 +24,7 @@ export function useSignaling({ wsUrl, onMessage, onOpen, onClose }: UseSignaling
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCount = useRef(0);
+  const isDisposedRef = useRef(false);
 
   const onMessageRef = useRef(onMessage);
   const onOpenRef = useRef(onOpen);
@@ -41,55 +42,93 @@ export function useSignaling({ wsUrl, onMessage, onOpen, onClose }: UseSignaling
     }
   }, []);
 
-  const connect = useCallback(() => {
+  useEffect(() => {
     if (!wsUrl) return;
 
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+    isDisposedRef.current = false;
 
-    try {
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+    const connect = () => {
+      if (isDisposedRef.current) return;
 
-      ws.onopen = () => {
-        retryCount.current = 0;
-        onOpenRef.current?.();
-      };
+      // Don't reconnect if already connected or connecting
+      if (
+        wsRef.current &&
+        (wsRef.current.readyState === WebSocket.OPEN ||
+          wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data as string) as SignalingMessage;
-          onMessageRef.current?.(msg);
-        } catch {
-          // ignore malformed messages
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (isDisposedRef.current || wsRef.current !== ws) {
+            ws.close();
+            return;
+          }
+          retryCount.current = 0;
+          onOpenRef.current?.();
+        };
+
+        ws.onmessage = (event) => {
+          if (isDisposedRef.current || wsRef.current !== ws) return;
+          try {
+            const msg = JSON.parse(event.data as string) as SignalingMessage;
+            onMessageRef.current?.(msg);
+          } catch {
+            // ignore malformed messages
+          }
+        };
+
+        ws.onclose = () => {
+          // If unmounted or this was an old socket, do not trigger reconnect
+          if (isDisposedRef.current || wsRef.current !== ws) {
+            return;
+          }
+          wsRef.current = null;
+          onCloseRef.current?.();
+
+          // Exponential back-off: 1s, 2s, 4s … max 16s
+          const delay = Math.min(1000 * Math.pow(2, retryCount.current), 16_000);
+          retryCount.current++;
+          reconnectTimer.current = setTimeout(connect, delay);
+        };
+
+        ws.onerror = () => {
+          if (wsRef.current === ws) {
+            ws.close();
+          }
+        };
+      } catch {
+        if (!isDisposedRef.current) {
+          const delay = Math.min(1000 * Math.pow(2, retryCount.current), 16_000);
+          retryCount.current++;
+          reconnectTimer.current = setTimeout(connect, delay);
         }
-      };
-
-      ws.onclose = () => {
-        onCloseRef.current?.();
-        // Exponential back-off: 1s, 2s, 4s … max 16s
-        const delay = Math.min(1000 * Math.pow(2, retryCount.current), 16_000);
-        retryCount.current++;
-        reconnectTimer.current = setTimeout(connect, delay);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
-    } catch {
-      // ignore connection initial error
-    }
-  }, [wsUrl]);
-
-  useEffect(() => {
-    connect();
-    return () => {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      }
     };
-  }, [connect]);
+
+    connect();
+
+    return () => {
+      isDisposedRef.current = true;
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      if (wsRef.current) {
+        const ws = wsRef.current;
+        wsRef.current = null;
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+      }
+    };
+  }, [wsUrl]);
 
   return { send };
 }

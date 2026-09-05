@@ -35,13 +35,47 @@ export default function ViewerPage() {
   const [stats, setStats] = useState<StreamStats>(DEFAULT_STATS);
 
   const obsMode = new URLSearchParams(window.location.search).has('obs');
+  const [hudVisible, setHudVisible] = useState(!obsMode);
 
-  // ── Server info from Tauri ─────────────────────────────────────────────────
+  // Toggle HUD with 'H' key or double click (great for OBS Window Capture)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'h' || e.key === 'H') {
+        setHudVisible((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // ── Server info from Tauri or backend REST API ────────────────────────────
   useEffect(() => {
     invoke<ServerInfo>('cmd_get_server_info')
       .then(setServerInfo)
-      .catch(() => {
-        setServerInfo({ ip: window.location.hostname, port: 3000, url: `https://${window.location.hostname}:3000` });
+      .catch(async () => {
+        // In OBS Browser Source or regular browser, fetch server info from Axum
+        try {
+          const apiUrl = window.location.port === '1420'
+            ? 'http://127.0.0.1:3001/api/info'
+            : (window.location.protocol === 'https:'
+                ? `https://${window.location.hostname}:3000/api/info`
+                : `http://${window.location.hostname || '127.0.0.1'}:3001/api/info`);
+          const res = await fetch(apiUrl);
+          const data = await res.json();
+          setServerInfo({
+            ip: data.ip,
+            port: data.port,
+            url: data.sender_url ? data.sender_url.replace('/sender', '') : `https://${data.ip}:${data.port}`,
+            localWsUrl: 'ws://127.0.0.1:3001/ws',
+          });
+        } catch {
+          setServerInfo({
+            ip: '127.0.0.1',
+            port: 3000,
+            url: 'https://127.0.0.1:3000',
+            localWsUrl: 'ws://127.0.0.1:3001/ws',
+          });
+        }
       });
   }, []);
 
@@ -57,9 +91,7 @@ export default function ViewerPage() {
   });
 
   // ── Signaling ──────────────────────────────────────────────────────────────
-  const wsUrl = serverInfo
-    ? (serverInfo.localWsUrl || `ws://127.0.0.1:3001/ws`)
-    : '';
+  const wsUrl = serverInfo?.localWsUrl || 'ws://127.0.0.1:3001/ws';
 
   const handleSignalingMessage = useCallback(
     (msg: SignalingMessage) => {
@@ -127,7 +159,10 @@ export default function ViewerPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="relative w-full h-full bg-[var(--color-surface-0)] overflow-hidden">
+    <div
+      className="relative w-full h-full bg-[var(--color-surface-0)] overflow-hidden"
+      onDoubleClick={() => setHudVisible((v) => !v)}
+    >
 
       {/* ── Full-screen video ──────────────────────────────────────────────── */}
       <video
@@ -140,7 +175,7 @@ export default function ViewerPage() {
       />
 
       {/* ── Waiting / idle overlay ─────────────────────────────────────────── */}
-      {!isStreaming && !obsMode && (
+      {!isStreaming && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-8 animate-fade-in">
           {/* App title */}
           <div className="text-center">
@@ -166,7 +201,7 @@ export default function ViewerPage() {
       )}
 
       {/* ── HUD overlay (shown while streaming) ───────────────────────────── */}
-      {!obsMode && (
+      {hudVisible && (
         <div className="hud-overlay absolute inset-0 pointer-events-none">
 
           {/* Top bar */}
@@ -179,13 +214,23 @@ export default function ViewerPage() {
               <LiveIndicator active={isStreaming} />
             </div>
 
-            <RecordButton
-              state={recorder.state}
-              onStart={handleRecordToggle}
-              onStop={handleRecordToggle}
-              disabled={!isStreaming}
-              formattedSize={recorder.formattedSize}
-            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setHudVisible(false)}
+                title="Hide HUD for clean OBS capture (Press 'H' or double-click to restore)"
+                className="px-2.5 py-1 text-xs font-medium rounded-lg bg-white/10 hover:bg-white/20 text-white/70 hover:text-white transition-colors"
+              >
+                Hide HUD [H]
+              </button>
+              <RecordButton
+                state={recorder.state}
+                onStart={handleRecordToggle}
+                onStop={handleRecordToggle}
+                disabled={!isStreaming}
+                formattedSize={recorder.formattedSize}
+              />
+            </div>
           </div>
 
           {/* Bottom bar */}

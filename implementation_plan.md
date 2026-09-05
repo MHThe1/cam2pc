@@ -73,14 +73,27 @@ Two primary use cases drive the entire architecture:
 - Chunked recording (10s segments internally) to handle long sessions without memory issues
 
 ### Mode 2: OBS Integration (Recommended for streaming/pro recording)
-- OBS uses **Browser Source** pointing to `https://localhost:3000/viewer`
-- OBS sees our video as any other source — can overlay, composite, etc.
-- OBS records using **its own encoder** (ProRes, H.264 High, HEVC — any format)
-- OBS streams to YouTube/Twitch with all its built-in tools
-- **This is the pro workflow** — phone becomes a professional camera input in OBS
 
-> [!TIP]
-> **For OBS Browser Source**, set the URL to `https://[YOUR-PC-LOCAL-IP]:3000` and set resolution to **1920×1080**. The viewer page will be a clean full-screen video with no UI chrome, optimized for OBS capture.
+There are three ways to bring Cam2PC into OBS Studio:
+
+#### Option A: Window Capture (Easiest & Recommended)
+- In OBS: Add Source → **Window Capture** → select `[Cam2PC.exe]: Cam2PC`
+- Capture Method: **Windows 10 / 11 (Desktop Duplication)**
+- In Cam2PC: Click **Hide HUD [H]** (or press `H` or double-click) to remove all UI overlays for a 100% clean video feed
+- OBS records with zero network or browser overhead, capturing the hardware-accelerated DirectX/GPU feed
+
+#### Option B: NDI™ Source (Cleanest Broadcast Quality)
+- In Cam2PC: Click the **NDI** toggle button in the bottom-right corner to broadcast as a native NDI source named `Cam2PC`
+- In OBS: Add Source → **NDI™ Source** (requires [DistroAV / obs-ndi plugin](https://github.com/DistroAV/DistroAV)) → select `Cam2PC`
+- Delivers pristine frames directly into OBS with zero window borders and no browser capture overhead
+
+#### Option C: Browser Source
+- In OBS: Add Source → **Browser Source**
+- URL: `http://127.0.0.1:3001/?obs=1` (or `http://localhost:3001/viewer?obs=1`)
+  - **IMPORTANT**: Use `http://` on port `3001` (NOT `https://...:3000`). OBS CEF silently blocks self-signed SSL certificates from `https://`, resulting in a black screen.
+- Width: **1920**, Height: **1080**
+- Check **Control audio via OBS** if you wish to monitor or mix the phone's microphone
+- Scan the QR code displayed in OBS from your phone to connect the stream
 
 ---
 

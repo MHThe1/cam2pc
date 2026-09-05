@@ -11,6 +11,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<ViewerPage />} />
+      <Route path="/viewer" element={<ViewerPage />} />
       <Route path="/sender" element={<SenderPage />} />
     </Routes>
   );

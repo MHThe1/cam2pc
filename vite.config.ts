@@ -24,6 +24,19 @@ export default defineConfig(({ command }) => ({
       // during cargo builds which causes EBUSY errors in Vite's watcher
       ignored: ['**/src-tauri/target/**'],
     },
+    proxy: {
+      '/ws': {
+        target: 'ws://127.0.0.1:3001',
+        ws: true,
+      },
+      '/api': {
+        target: 'http://127.0.0.1:3001',
+      },
+      '/ndi': {
+        target: 'ws://127.0.0.1:3001',
+        ws: true,
+      },
+    },
   },
 
   // Tauri uses environment variables to know which host to use
