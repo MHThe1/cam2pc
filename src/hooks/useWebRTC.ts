@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ConnectionStatus, SignalingMessage } from '@/types';
+import type { ConnectionStatus, SignalingMessage, QualityPresetConfig } from '@/types';
+import { QUALITY_PRESETS } from '@/types';
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
-
-const MAX_VIDEO_BITRATE_BPS = 50_000_000; // 50 Mbps
-const MAX_FRAMERATE = 60;
 
 interface UseSignalingOptions {
   wsUrl: string;
@@ -242,9 +240,14 @@ interface UseSenderWebRTCOptions {
 export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const currentPresetRef = useRef<QualityPresetConfig>(QUALITY_PRESETS.balanced);
 
   const getCameraStream = useCallback(
-    async (facingMode: 'environment' | 'user', audio: boolean): Promise<MediaStream> => {
+    async (
+      facingMode: 'environment' | 'user',
+      audio: boolean,
+      preset: QualityPresetConfig = QUALITY_PRESETS.balanced,
+    ): Promise<MediaStream> => {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Camera API not available. Ensure page is loaded over HTTPS.');
       }
@@ -253,9 +256,9 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
         return await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: facingMode },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 60 },
+            width: { ideal: preset.width },
+            height: { ideal: preset.height },
+            frameRate: { ideal: preset.fps },
           },
           audio,
         });
@@ -275,9 +278,12 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
       facingMode: 'environment' | 'user',
       audio: boolean,
       sendMsg: (msg: object) => void,
+      preset: QualityPresetConfig = QUALITY_PRESETS.balanced,
     ) => {
-      // Get camera
-      const stream = await getCameraStream(facingMode, audio);
+      currentPresetRef.current = preset;
+
+      // Get camera stream with preset resolution & fps
+      const stream = await getCameraStream(facingMode, audio, preset);
       streamRef.current = stream;
 
       // Create peer connection
@@ -285,6 +291,9 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
       pcRef.current = pc;
 
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      // Force hardware H.264 codec preference on transceivers
+      preferH264(pc);
 
       pc.onicecandidate = (e) => {
         if (e.candidate) {
@@ -296,13 +305,14 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
         const state = pc.connectionState as ConnectionStatus;
         onStatusChange(state);
         if (state === 'connected') {
-          forceBitrate(pc);
+          forceBitrate(pc, currentPresetRef.current.bitrateBps, currentPresetRef.current.fps);
         }
       };
 
-      // Create and send offer
+      // Create offer and prioritize H.264 in SDP (fallback for browsers ignoring setCodecPreferences)
       const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      const prioritizedSdp = prioritizeH264InSdp(offer.sdp ?? '');
+      await pc.setLocalDescription({ type: offer.type, sdp: prioritizedSdp });
       sendMsg({ type: 'offer', sdp: pc.localDescription });
 
       return stream;
@@ -322,26 +332,49 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
     async (facingMode: 'environment' | 'user', audio: boolean) => {
       if (!pcRef.current || !streamRef.current) return null;
 
-      // Stop old tracks
+      const preset = currentPresetRef.current;
       streamRef.current.getTracks().forEach((t) => t.stop());
 
-      // Get new stream
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
-        audio,
-      });
+      const newStream = await getCameraStream(facingMode, audio, preset);
       streamRef.current = newStream;
 
-      // Replace video track in peer connection
       const videoTrack = newStream.getVideoTracks()[0];
       const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
       if (sender && videoTrack) {
         await sender.replaceTrack(videoTrack);
+        await forceBitrate(pcRef.current, preset.bitrateBps, preset.fps);
       }
 
       return newStream;
     },
-    [],
+    [getCameraStream],
+  );
+
+  const changePreset = useCallback(
+    async (
+      newPreset: QualityPresetConfig,
+      facingMode: 'environment' | 'user',
+      audio: boolean,
+    ) => {
+      currentPresetRef.current = newPreset;
+      if (!pcRef.current || !streamRef.current) return null;
+
+      // Stop old tracks and request camera with new constraints
+      streamRef.current.getTracks().forEach((t) => t.stop());
+
+      const newStream = await getCameraStream(facingMode, audio, newPreset);
+      streamRef.current = newStream;
+
+      const videoTrack = newStream.getVideoTracks()[0];
+      const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
+      if (sender && videoTrack) {
+        await sender.replaceTrack(videoTrack);
+        await forceBitrate(pcRef.current, newPreset.bitrateBps, newPreset.fps);
+      }
+
+      return newStream;
+    },
+    [getCameraStream],
   );
 
   const close = useCallback(() => {
@@ -351,11 +384,72 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
     pcRef.current = null;
   }, []);
 
-  return { startStream, handleAnswer, addIceCandidate, flipCamera, close, streamRef };
+  return { startStream, handleAnswer, addIceCandidate, flipCamera, changePreset, close, streamRef };
+}
+
+/** Configures RTCRtpTransceiver codec preferences to prioritize hardware H.264. */
+function preferH264(pc: RTCPeerConnection) {
+  if (typeof RTCRtpSender !== 'undefined' && 'getCapabilities' in RTCRtpSender) {
+    const capabilities = RTCRtpSender.getCapabilities('video');
+    if (capabilities?.codecs) {
+      const h264 = capabilities.codecs.filter(
+        (c) => c.mimeType.toLowerCase() === 'video/h264',
+      );
+      const others = capabilities.codecs.filter(
+        (c) => c.mimeType.toLowerCase() !== 'video/h264',
+      );
+      const sorted = [...h264, ...others];
+
+      for (const t of pc.getTransceivers()) {
+        if (t.sender.track?.kind === 'video' && 'setCodecPreferences' in t) {
+          try {
+            t.setCodecPreferences(sorted);
+          } catch {
+            // Browser might reject specific codec list — ignore
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Reorders SDP m=video payload types so H.264 payloads appear first.
+ * Guarantees hardware H.264 negotiation on older Android devices where setCodecPreferences is ignored.
+ */
+function prioritizeH264InSdp(sdp: string): string {
+  if (!sdp.includes('H264')) return sdp;
+
+  const lines = sdp.split('\r\n');
+  const mVideoIndex = lines.findIndex((l) => l.startsWith('m=video'));
+  if (mVideoIndex === -1) return sdp;
+
+  // Find all H.264 payload type IDs (e.g. a=rtpmap:96 H264/90000)
+  const h264Payloads: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^a=rtpmap:(\d+)\s+H264\/90000/i);
+    if (match) {
+      h264Payloads.push(match[1]);
+    }
+  }
+
+  if (h264Payloads.length === 0) return sdp;
+
+  const mParts = lines[mVideoIndex].split(' ');
+  const header = mParts.slice(0, 3);
+  const existingPayloads = mParts.slice(3);
+
+  const reordered = [
+    ...h264Payloads,
+    ...existingPayloads.filter((p) => !h264Payloads.includes(p)),
+  ];
+
+  lines[mVideoIndex] = [...header, ...reordered].join(' ');
+  return lines.join('\r\n');
 }
 
 /** Sets the maximum encoding bitrate and framerate on the video sender. */
-async function forceBitrate(pc: RTCPeerConnection) {
+async function forceBitrate(pc: RTCPeerConnection, maxBitrateBps: number, maxFps: number) {
   const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
   if (!sender) return;
 
@@ -363,12 +457,12 @@ async function forceBitrate(pc: RTCPeerConnection) {
   if (!params.encodings || params.encodings.length === 0) {
     params.encodings = [{}];
   }
-  params.encodings[0].maxBitrate = MAX_VIDEO_BITRATE_BPS;
-  params.encodings[0].maxFramerate = MAX_FRAMERATE;
+  params.encodings[0].maxBitrate = maxBitrateBps;
+  params.encodings[0].maxFramerate = maxFps;
 
   try {
     await sender.setParameters(params);
   } catch {
-    // Some browsers don't support setParameters — non-fatal
+    // Some mobile browsers don't support setParameters — non-fatal
   }
 }
