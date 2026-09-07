@@ -29,3 +29,11 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Android build artifacts
+.gradle/
+**/build/
+android/.gradle/
+android/app/build/
+*.apk
+*.aab
