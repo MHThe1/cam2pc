@@ -114,7 +114,9 @@ class MainActivity : AppCompatActivity() {
             val port = uri.port
             val room = uri.getQueryParameter("room") ?: ""
 
-            val serverUrl = if (port > 0) "$host:$port" else host
+            // PC exposes port 3001 for high-performance plain WebSocket streaming.
+            // Port 3000 is HTTPS for web browsers.
+            val serverUrl = if (port == 3000 || port <= 0) "$host:3001" else "$host:$port"
             binding.editServerUrl.setText(serverUrl)
             binding.editRoomId.setText(room)
 
@@ -125,13 +127,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startStreaming() {
-        val serverAddr = binding.editServerUrl.text?.toString()?.trim() ?: ""
+        var serverAddr = binding.editServerUrl.text?.toString()?.trim() ?: ""
         val roomId = binding.editRoomId.text?.toString()?.trim() ?: ""
 
         if (serverAddr.isEmpty() || roomId.isEmpty()) {
             Toast.makeText(this, "Please enter PC address & Room ID (or Scan QR)", Toast.LENGTH_LONG).show()
             return
         }
+
+        // Clean protocol prefix if typed
+        serverAddr = serverAddr.removePrefix("http://").removePrefix("https://")
+            .removePrefix("ws://").removePrefix("wss://").trimEnd('/')
 
         // Resolve profile
         val (width, height, fps, bitrate) = when (binding.radioProfiles.checkedRadioButtonId) {
@@ -140,11 +146,11 @@ class MainActivity : AppCompatActivity() {
             else -> Quad(1920, 1080, 30, 6_000_000) // Balanced default
         }
 
-        // Connect client
-        val wsUrl = if (serverAddr.startsWith("ws://") || serverAddr.startsWith("wss://")) {
-            "$serverAddr/ws"
-        } else {
-            "ws://$serverAddr/ws"
+        // Build WebSocket URL: port 3000 uses wss://, 3001 (or default) uses ws://
+        val wsUrl = when {
+            serverAddr.endsWith(":3000") -> "wss://$serverAddr/ws"
+            serverAddr.contains(":") -> "ws://$serverAddr/ws"
+            else -> "ws://$serverAddr:3001/ws"
         }
 
         streamClient = StreamClient(wsUrl, roomId) { connected, msg ->

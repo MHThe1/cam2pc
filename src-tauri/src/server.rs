@@ -30,24 +30,24 @@ use uuid::Uuid;
 
 // ── Shared server state ───────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignalPayload {
-    pub from: String,
-    pub data: String,
+#[derive(Clone, Debug)]
+pub enum RoomMessage {
+    Text { from: String, data: String },
+    Binary { from: String, data: Arc<Vec<u8>> },
 }
 
 #[derive(Clone)]
 pub struct ServerState {
     pub local_ip: String,
     pub port: u16,
-    /// roomId → broadcast channel (used to relay signaling messages)
-    pub rooms: Arc<DashMap<String, broadcast::Sender<SignalPayload>>>,
+    /// roomId → broadcast channel (used to relay signaling & video frames)
+    pub rooms: Arc<DashMap<String, broadcast::Sender<RoomMessage>>>,
 }
 
 impl ServerState {
     pub fn create_room(&self) -> (String, String, String) {
         let id = Uuid::new_v4().to_string()[..6].to_uppercase().to_string();
-        let (tx, _rx) = broadcast::channel::<SignalPayload>(128);
+        let (tx, _rx) = broadcast::channel::<RoomMessage>(256);
         self.rooms.insert(id.clone(), tx);
 
         let sender_url = format!("https://{}:{}/sender?room={}", self.local_ip, self.port, id);
@@ -56,14 +56,51 @@ impl ServerState {
         (id, sender_url, qr)
     }
 
-    pub fn get_or_create_room(&self, id: &str) -> broadcast::Sender<SignalPayload> {
+    pub fn get_or_create_room(&self, id: &str) -> broadcast::Sender<RoomMessage> {
         self.rooms
             .entry(id.to_string())
             .or_insert_with(|| {
-                let (tx, _rx) = broadcast::channel::<SignalPayload>(128);
+                let (tx, _rx) = broadcast::channel::<RoomMessage>(256);
                 tx
             })
             .clone()
+    }
+}
+
+// ── Static assets embedded in binary ──────────────────────────────────────────
+
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../dist"]
+struct StaticAssets;
+
+async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    if let Some(content) = StaticAssets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return (
+            [
+                (axum::http::header::CONTENT_TYPE, mime.as_ref()),
+                (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            content.data,
+        )
+            .into_response();
+    }
+
+    // SPA fallback to index.html for client-side routing (/sender, /viewer, etc.)
+    if let Some(content) = StaticAssets::get("index.html") {
+        (
+            [
+                (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            content.data,
+        )
+            .into_response()
+    } else {
+        (axum::http::StatusCode::NOT_FOUND, "404 Not Found").into_response()
     }
 }
 
@@ -74,42 +111,28 @@ pub async fn start(state: ServerState, tls: Arc<ServerConfig>) -> Result<()> {
     let https_port = state.port;
     let local_ws_port = 3001;
 
-    let dist_path = if std::path::Path::new("dist").exists() {
-        std::path::PathBuf::from("dist")
-    } else if std::path::Path::new("../dist").exists() {
-        std::path::PathBuf::from("../dist")
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("dist")))
-            .unwrap_or_else(|| std::path::PathBuf::from("dist"))
-    };
-
-    let serve_dir = tower_http::services::ServeDir::new(&dist_path)
-        .fallback(tower_http::services::ServeFile::new(dist_path.join("index.html")));
-
     let app = Router::new()
         .route("/ws", get(ws_signaling_handler))
         .route("/ndi", get(ws_ndi_handler))
         .route("/api/info", get(api_info))
         .route("/api/qr", get(api_qr))
-        .fallback_service(serve_dir)
+        .fallback(static_handler)
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state.clone());
 
-    // 1. Plain HTTP/WS listener on 127.0.0.1:3001 for local PC desktop app (no TLS cert errors in WebView2)
+    // 1. Plain HTTP/WS listener on 0.0.0.0:3001 for LAN (native app) & local PC desktop app
     let local_app = app.clone();
     tokio::spawn(async move {
-        let local_addr: SocketAddr = format!("127.0.0.1:{}", local_ws_port).parse().unwrap();
+        let local_addr: SocketAddr = format!("0.0.0.0:{}", local_ws_port).parse().unwrap();
         if let Ok(listener) = tokio::net::TcpListener::bind(local_addr).await {
-            info!("Local PC signaling listening on ws://127.0.0.1:{}/ws", local_ws_port);
+            info!("LAN plain signaling listening on ws://0.0.0.0:{}/ws", local_ws_port);
             let _ = axum::serve(listener, local_app.into_make_service()).await;
         } else {
             error!("Failed to bind local listener on {}", local_addr);
         }
     });
 
-    // 2. HTTPS/WSS listener on 0.0.0.0:3000 for mobile phones (requires HTTPS for camera permissions)
+    // 2. HTTPS/WSS listener on 0.0.0.0:3000 for mobile browser phones (requires HTTPS for camera permissions)
     let addr: SocketAddr = format!("0.0.0.0:{}", https_port).parse()?;
     let rustls_config = RustlsConfig::from_config(tls);
 
@@ -188,123 +211,157 @@ async fn handle_signaling(socket: WebSocket, state: ServerState) {
     let mut room_subscriber_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(msg)) = ws_receiver.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-
-        let msg_type = parsed["type"].as_str().unwrap_or("").to_string();
-
-        match msg_type.as_str() {
-            // ── Viewer creates a room ──────────────────────────────────────
-            "create-room" => {
-                let id = Uuid::new_v4().to_string()[..6].to_uppercase().to_string();
-                let room_tx = state.get_or_create_room(&id);
-
-                current_room = Some(id.clone());
-                current_role = Some("viewer".into());
-
-                // Subscribe to room messages
-                if let Some(h) = room_subscriber_handle.take() {
-                    h.abort();
-                }
-                let mut bcast_rx = room_tx.subscribe();
-                let out_tx_clone = out_tx.clone();
-                let cid = client_id.clone();
-                room_subscriber_handle = Some(tokio::spawn(async move {
-                    while let Ok(signal) = bcast_rx.recv().await {
-                        if signal.from != cid {
-                            let _ = out_tx_clone.send(Message::Text(signal.data.into()));
-                        }
-                    }
-                }));
-
-                let sender_url =
-                    format!("https://{}:{}/sender?room={}", state.local_ip, state.port, id);
-                let qr = crate::qr::url_to_data_url(&sender_url).unwrap_or_default();
-
-                let response = serde_json::json!({
-                    "type": "room-created",
-                    "roomId": id,
-                    "senderUrl": sender_url,
-                    "qrDataUrl": qr,
-                    "ndiAvailable": crate::ndi::is_running(),
-                });
-
-                let _ = out_tx.send(Message::Text(response.to_string().into()));
-                info!("Viewer created and joined room: {}", id);
-            }
-
-            // ── Client joins a room ────────────────────────────────────────
-            "join" => {
-                let Some(rid) = parsed["room"].as_str() else {
+        match msg {
+            Message::Text(text) => {
+                let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
                     continue;
                 };
-                let rid = rid.to_string();
-                let room_tx = state.get_or_create_room(&rid);
 
-                current_room = Some(rid.clone());
-                let role = parsed["role"].as_str().unwrap_or("sender").to_string();
-                current_role = Some(role.clone());
+                let msg_type = parsed["type"].as_str().unwrap_or("").to_string();
 
-                // Subscribe to room messages
-                if let Some(h) = room_subscriber_handle.take() {
-                    h.abort();
-                }
-                let mut bcast_rx = room_tx.subscribe();
-                let out_tx_clone = out_tx.clone();
-                let cid = client_id.clone();
-                room_subscriber_handle = Some(tokio::spawn(async move {
-                    while let Ok(signal) = bcast_rx.recv().await {
-                        if signal.from != cid {
-                            let _ = out_tx_clone.send(Message::Text(signal.data.into()));
+                match msg_type.as_str() {
+                    // ── Viewer creates a room ──────────────────────────────────────
+                    "create-room" => {
+                        let id = Uuid::new_v4().to_string()[..6].to_uppercase().to_string();
+                        let room_tx = state.get_or_create_room(&id);
+
+                        current_room = Some(id.clone());
+                        current_role = Some("viewer".into());
+
+                        // Subscribe to room messages
+                        if let Some(h) = room_subscriber_handle.take() {
+                            h.abort();
+                        }
+                        let mut bcast_rx = room_tx.subscribe();
+                        let out_tx_clone = out_tx.clone();
+                        let cid = client_id.clone();
+                        room_subscriber_handle = Some(tokio::spawn(async move {
+                            while let Ok(signal) = bcast_rx.recv().await {
+                                match signal {
+                                    RoomMessage::Text { from, data } => {
+                                        if from != cid {
+                                            let _ = out_tx_clone.send(Message::Text(data));
+                                        }
+                                    }
+                                    RoomMessage::Binary { from, data } => {
+                                        if from != cid {
+                                            let _ = out_tx_clone.send(Message::Binary((*data).clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }));
+
+                        let sender_url =
+                            format!("https://{}:{}/sender?room={}", state.local_ip, state.port, id);
+                        let qr = crate::qr::url_to_data_url(&sender_url).unwrap_or_default();
+
+                        let response = serde_json::json!({
+                            "type": "room-created",
+                            "roomId": id,
+                            "senderUrl": sender_url,
+                            "qrDataUrl": qr,
+                            "ndiAvailable": crate::ndi::is_running(),
+                        });
+
+                        let _ = out_tx.send(Message::Text(response.to_string()));
+                        info!("Viewer created and joined room: {}", id);
+                    }
+
+                    // ── Client joins a room ────────────────────────────────────────
+                    "join" => {
+                        let Some(rid) = parsed["room"].as_str() else {
+                            continue;
+                        };
+                        let rid = rid.to_string();
+                        let room_tx = state.get_or_create_room(&rid);
+
+                        current_room = Some(rid.clone());
+                        let role = parsed["role"].as_str().unwrap_or("sender").to_string();
+                        current_role = Some(role.clone());
+
+                        // Subscribe to room messages
+                        if let Some(h) = room_subscriber_handle.take() {
+                            h.abort();
+                        }
+                        let mut bcast_rx = room_tx.subscribe();
+                        let out_tx_clone = out_tx.clone();
+                        let cid = client_id.clone();
+                        room_subscriber_handle = Some(tokio::spawn(async move {
+                            while let Ok(signal) = bcast_rx.recv().await {
+                                match signal {
+                                    RoomMessage::Text { from, data } => {
+                                        if from != cid {
+                                            let _ = out_tx_clone.send(Message::Text(data));
+                                        }
+                                    }
+                                    RoomMessage::Binary { from, data } => {
+                                        if from != cid {
+                                            let _ = out_tx_clone.send(Message::Binary((*data).clone()));
+                                        }
+                                    }
+                                }
+                            }
+                        }));
+
+                        // Broadcast that sender joined
+                        if role == "sender" || role == "native-sender" {
+                            let _ = room_tx.send(RoomMessage::Text {
+                                from: client_id.clone(),
+                                data: serde_json::json!({
+                                    "type": "sender-joined",
+                                    "role": role
+                                }).to_string(),
+                            });
+                        }
+                        info!("Client ({}) joined room: {}", role, rid);
+                    }
+
+                    // ── Relay: viewer says ready → tell sender to create offer ─────
+                    "ready" => {
+                        if let Some(ref rid) = current_room {
+                            if let Some(room_tx) = state.rooms.get(rid) {
+                                let _ = room_tx.send(RoomMessage::Text {
+                                    from: client_id.clone(),
+                                    data: serde_json::json!({ "type": "create-offer" }).to_string(),
+                                });
+                                info!("Viewer ready sent to room: {}", rid);
+                            }
                         }
                     }
-                }));
 
-                // Broadcast that sender joined
-                if role == "sender" {
-                    let _ = room_tx.send(SignalPayload {
-                        from: client_id.clone(),
-                        data: serde_json::json!({ "type": "sender-joined" }).to_string(),
-                    });
-                }
-                info!("Client ({}) joined room: {}", role, rid);
-            }
+                    // ── Relay signaling messages between peers ─────────────────────
+                    "offer" | "answer" | "ice-candidate" => {
+                        if let Some(ref rid) = current_room {
+                            if let Some(room_tx) = state.rooms.get(rid) {
+                                let _ = room_tx.send(RoomMessage::Text {
+                                    from: client_id.clone(),
+                                    data: text.to_string(),
+                                });
+                            }
+                        }
+                    }
 
-            // ── Relay: viewer says ready → tell sender to create offer ─────
-            "ready" => {
-                if let Some(ref rid) = current_room {
-                    if let Some(room_tx) = state.rooms.get(rid) {
-                        let _ = room_tx.send(SignalPayload {
-                            from: client_id.clone(),
-                            data: serde_json::json!({ "type": "create-offer" }).to_string(),
-                        });
-                        info!("Viewer ready sent to room: {}", rid);
+                    _ => {
+                        warn!("Unknown signaling message type: {}", msg_type);
                     }
                 }
             }
 
-            // ── Relay signaling messages between peers ─────────────────────
-            "offer" | "answer" | "ice-candidate" => {
+            Message::Binary(bin) => {
+                // Relay raw H.264 video chunks directly to the room's viewer
                 if let Some(ref rid) = current_room {
                     if let Some(room_tx) = state.rooms.get(rid) {
-                        let _ = room_tx.send(SignalPayload {
+                        let _ = room_tx.send(RoomMessage::Binary {
                             from: client_id.clone(),
-                            data: text.to_string(),
+                            data: Arc::new(bin),
                         });
                     }
                 }
             }
 
-            _ => {
-                warn!("Unknown signaling message type: {}", msg_type);
-            }
+            Message::Close(_) => break,
+            _ => continue,
         }
     }
 
@@ -319,9 +376,9 @@ async fn handle_signaling(socket: WebSocket, state: ServerState) {
         if r == "viewer" {
             state.rooms.remove(&rid);
             info!("Viewer disconnected — room closed: {}", rid);
-        } else if r == "sender" {
+        } else if r == "sender" || r == "native-sender" {
             if let Some(room_tx) = state.rooms.get(&rid) {
-                let _ = room_tx.send(SignalPayload {
+                let _ = room_tx.send(RoomMessage::Text {
                     from: client_id,
                     data: serde_json::json!({ "type": "sender-left" }).to_string(),
                 });

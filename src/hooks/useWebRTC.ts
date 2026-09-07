@@ -10,6 +10,7 @@ const ICE_SERVERS: RTCIceServer[] = [
 interface UseSignalingOptions {
   wsUrl: string;
   onMessage: (msg: SignalingMessage) => void;
+  onBinary?: (data: ArrayBuffer) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
@@ -18,21 +19,23 @@ interface UseSignalingOptions {
  * Manages the WebSocket connection to the signaling server.
  * Handles reconnection with exponential back-off.
  */
-export function useSignaling({ wsUrl, onMessage, onOpen, onClose }: UseSignalingOptions) {
+export function useSignaling({ wsUrl, onMessage, onBinary, onOpen, onClose }: UseSignalingOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCount = useRef(0);
   const isDisposedRef = useRef(false);
 
   const onMessageRef = useRef(onMessage);
+  const onBinaryRef = useRef(onBinary);
   const onOpenRef = useRef(onOpen);
   const onCloseRef = useRef(onClose);
 
   useEffect(() => {
     onMessageRef.current = onMessage;
+    onBinaryRef.current = onBinary;
     onOpenRef.current = onOpen;
     onCloseRef.current = onClose;
-  }, [onMessage, onOpen, onClose]);
+  }, [onMessage, onBinary, onOpen, onClose]);
 
   const send = useCallback((msg: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -59,6 +62,7 @@ export function useSignaling({ wsUrl, onMessage, onOpen, onClose }: UseSignaling
 
       try {
         const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -72,6 +76,10 @@ export function useSignaling({ wsUrl, onMessage, onOpen, onClose }: UseSignaling
 
         ws.onmessage = (event) => {
           if (isDisposedRef.current || wsRef.current !== ws) return;
+          if (event.data instanceof ArrayBuffer) {
+            onBinaryRef.current?.(event.data);
+            return;
+          }
           try {
             const msg = JSON.parse(event.data as string) as SignalingMessage;
             onMessageRef.current?.(msg);
@@ -144,28 +152,15 @@ export function useViewerWebRTC({ onStream, onStats }: UseViewerWebRTCOptions) {
   const prevBytesRef = useRef(0);
   const [status, setStatus] = useState<ConnectionStatus>('idle');
 
-  const createPeerConnection = useCallback(() => {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    pcRef.current = pc;
+  const stopStats = useCallback(() => {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
+    }
+    prevBytesRef.current = 0;
+  }, []);
 
-    pc.ontrack = (event) => {
-      onStream(event.streams[0]);
-      setStatus('connected');
-      startStats(pc);
-    };
-
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-        setStatus('disconnected');
-        stopStats();
-      }
-    };
-
-    return pc;
-  }, [onStream]);
-
-  const startStats = (pc: RTCPeerConnection) => {
+  const startStats = useCallback((pc: RTCPeerConnection) => {
     stopStats();
     statsIntervalRef.current = setInterval(async () => {
       const stats = await pc.getStats();
@@ -185,15 +180,28 @@ export function useViewerWebRTC({ onStream, onStats }: UseViewerWebRTCOptions) {
         }
       });
     }, 1000);
-  };
+  }, [onStats, stopStats]);
 
-  const stopStats = () => {
-    if (statsIntervalRef.current) {
-      clearInterval(statsIntervalRef.current);
-      statsIntervalRef.current = null;
-    }
-    prevBytesRef.current = 0;
-  };
+  const createPeerConnection = useCallback(() => {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pcRef.current = pc;
+
+    pc.ontrack = (event) => {
+      onStream(event.streams[0]);
+      setStatus('connected');
+      startStats(pc);
+    };
+
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+        setStatus('disconnected');
+        stopStats();
+      }
+    };
+
+    return pc;
+  }, [onStream, startStats, stopStats]);
 
   const handleOffer = useCallback(
     async (
@@ -226,7 +234,7 @@ export function useViewerWebRTC({ onStream, onStats }: UseViewerWebRTCOptions) {
     pcRef.current?.close();
     pcRef.current = null;
     setStatus('idle');
-  }, []);
+  }, [stopStats]);
 
   return { status, setStatus, handleOffer, addIceCandidate, close, pcRef };
 }

@@ -1,39 +1,68 @@
-# Cam2PC — Node / Build artifacts
+# ── Node & Web Frontend ────────────────────────────────────────────────────────
 node_modules/
 dist/
+.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Tauri build output
+# ── Tauri & Rust Backend ───────────────────────────────────────────────────────
 src-tauri/target/
+target/
+**/*.rs.bk
 
-# Generated SSL certificates (machine-specific)
+# Machine-specific runtime certs
 src-tauri/certs/
 
-# Environment variables
+# ── Android Studio & Gradle ────────────────────────────────────────────────────
+.gradle/
+**/build/
+android/.gradle/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/captures/
+android/.externalNativeBuild/
+
+# ── Compiled Binary & Release Artifacts ────────────────────────────────────────
+*.exe
+*.msi
+*.apk
+*.aab
+*.zip
+*.tar.gz
+
+# ── Agent, AI & Scratch Files ──────────────────────────────────────────────────
+implementation_plan.md
+walkthrough.md
+scratch/
+.agents/
+.gemini/
+
+# ── Environment & Secrets ──────────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# Logs
+# ── Logs & Temporary ───────────────────────────────────────────────────────────
 *.log
-npm-debug.log*
+tmp/
+temp/
 
-# OS artifacts
+# ── OS & Editor Artifacts ──────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-
-# Editor directories
-.vscode/
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-
-# Android build artifacts
-.gradle/
-**/build/
-android/.gradle/
-android/app/build/
-*.apk
-*.aab

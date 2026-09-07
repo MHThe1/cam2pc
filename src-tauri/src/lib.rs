@@ -76,6 +76,23 @@ pub fn run() {
             // ── System tray ────────────────────────────────────────────────
             build_tray(&handle)?;
 
+            // ── Window navigation fallback ────────────────────────────────
+            let handle_clone = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Some(win) = handle_clone.get_webview_window("viewer") {
+                    let dev_alive = tokio::net::TcpStream::connect("127.0.0.1:1420").await.is_ok();
+                    if !dev_alive {
+                        info!("Vite dev server not found on 1420 — routing to embedded server http://127.0.0.1:3001");
+                        if let Ok(url) = "http://127.0.0.1:3001".parse() {
+                            let _ = win.navigate(url);
+                        }
+                    }
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            });
+
             info!("Cam2PC started — https://{}:{}", local_ip, port);
             Ok(())
         })
@@ -135,7 +152,14 @@ fn open_viewer_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     } else {
-        let _ = WebviewWindowBuilder::new(app, "viewer", tauri::WebviewUrl::App("/".into()))
+        let dev_alive = std::net::TcpStream::connect("127.0.0.1:1420").is_ok();
+        let url = if dev_alive {
+            tauri::WebviewUrl::App("/".into())
+        } else {
+            tauri::WebviewUrl::External("http://127.0.0.1:3001".parse().unwrap())
+        };
+
+        let _ = WebviewWindowBuilder::new(app, "viewer", url)
             .title("Cam2PC")
             .inner_size(1280.0, 800.0)
             .min_inner_size(900.0, 600.0)

@@ -20,7 +20,7 @@ export function useNDIBridge() {
   const loopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState<NDIStatus>('off');
 
-  const enable = useCallback((videoEl: HTMLVideoElement, serverBaseUrl: string) => {
+  const enable = useCallback((sourceEl: HTMLVideoElement | HTMLCanvasElement, serverBaseUrl: string) => {
     if (wsRef.current) return; // Already active
 
     // Set up off-screen canvas for frame capture
@@ -43,7 +43,7 @@ export function useNDIBridge() {
 
     ws.onopen = () => {
       setStatus('active');
-      startLoop(videoEl);
+      startLoop(sourceEl);
     };
 
     ws.onerror = () => setStatus('error');
@@ -62,7 +62,7 @@ export function useNDIBridge() {
     setStatus('off');
   }, []);
 
-  const startLoop = (videoEl: HTMLVideoElement) => {
+  const startLoop = (sourceEl: HTMLVideoElement | HTMLCanvasElement) => {
     const loop = () => {
       const ws = wsRef.current;
       const ctx = ctxRef.current;
@@ -70,8 +70,12 @@ export function useNDIBridge() {
 
       if (!ws || ws.readyState !== WebSocket.OPEN || !ctx || !canvas) return;
 
-      if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        ctx.drawImage(videoEl, 0, 0, NDI_WIDTH, NDI_HEIGHT);
+      const isReady = sourceEl instanceof HTMLVideoElement
+        ? sourceEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        : true;
+
+      if (isReady) {
+        ctx.drawImage(sourceEl, 0, 0, NDI_WIDTH, NDI_HEIGHT);
         const imageData = ctx.getImageData(0, 0, NDI_WIDTH, NDI_HEIGHT);
         // Send as binary (RGBA buffer)
         ws.send(imageData.data.buffer);

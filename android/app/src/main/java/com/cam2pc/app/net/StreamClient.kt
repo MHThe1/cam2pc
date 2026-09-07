@@ -3,7 +3,12 @@ package com.cam2pc.app.net
 import android.util.Log
 import okhttp3.*
 import okio.ByteString.Companion.toByteString
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 /**
  * High-performance WebSocket stream client using OkHttp.
@@ -18,10 +23,32 @@ class StreamClient(
         private const val TAG = "StreamClient"
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // Keep-alive indefinitely
-        .build()
+    private val client = createOkHttpClient()
+
+    private fun createOkHttpClient(): OkHttpClient {
+        return try {
+            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            })
+
+            val sslContext = SSLContext.getInstance("SSL")
+            sslContext.init(null, trustAllCerts, SecureRandom())
+
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS) // Keep-alive indefinitely
+                .build()
+        } catch (e: Exception) {
+            OkHttpClient.Builder()
+                .connectTimeout(6, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .build()
+        }
+    }
 
     private var webSocket: WebSocket? = null
     @Volatile
