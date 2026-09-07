@@ -4,19 +4,20 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import androidx.lifecycle.LifecycleService
 import com.cam2pc.app.MainActivity
 
 /**
  * Foreground service that holds a WakeLock so streaming runs seamlessly in the background
  * even when the screen is locked or dimmed.
  */
-class StreamService : LifecycleService() {
+class StreamService : Service() {
 
     companion object {
         const val CHANNEL_ID = "cam2pc_stream_channel"
@@ -27,6 +28,8 @@ class StreamService : LifecycleService() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
