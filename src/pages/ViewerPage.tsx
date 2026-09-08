@@ -197,6 +197,8 @@ export default function ViewerPage() {
             senderUrl: msg.senderUrl,
             ndiAvailable: msg.ndiAvailable,
           });
+          // In persistent / OBS mode, send ready immediately in case sender is already connected
+          sendRef.current({ type: 'ready' });
           break;
 
         case 'sender-joined':
@@ -231,7 +233,13 @@ export default function ViewerPage() {
     wsUrl,
     onMessage: handleSignalingMessage,
     onBinary: handleBinaryData,
-    onOpen: () => sendRef.current({ type: 'create-room' }),
+    onOpen: () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room');
+      const obsParam = urlParams.has('obs');
+      const persistentRoom = roomParam || (obsParam ? 'OBS' : undefined);
+      sendRef.current({ type: 'create-room', roomId: persistentRoom });
+    },
   });
 
   useEffect(() => {

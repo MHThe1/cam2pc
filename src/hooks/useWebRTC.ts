@@ -208,6 +208,12 @@ export function useViewerWebRTC({ onStream, onStats }: UseViewerWebRTCOptions) {
       sdp: RTCSessionDescriptionInit,
       sendMsg: (msg: object) => void,
     ) => {
+      if (pcRef.current) {
+        try {
+          pcRef.current.close();
+        } catch {}
+        pcRef.current = null;
+      }
       const pc = createPeerConnection();
       setStatus('connecting');
 
@@ -290,9 +296,26 @@ export function useSenderWebRTC({ onStatusChange }: UseSenderWebRTCOptions) {
     ) => {
       currentPresetRef.current = preset;
 
-      // Get camera stream with preset resolution & fps
-      const stream = await getCameraStream(facingMode, audio, preset);
-      streamRef.current = stream;
+      // Reuse existing camera stream if tracks are still active (avoids iOS permission prompt & lag)
+      const hasActiveTracks =
+        streamRef.current &&
+        streamRef.current.getTracks().some((t) => t.readyState === 'live');
+
+      let stream: MediaStream;
+      if (hasActiveTracks) {
+        stream = streamRef.current!;
+      } else {
+        stream = await getCameraStream(facingMode, audio, preset);
+        streamRef.current = stream;
+      }
+
+      // Close previous peer connection if any
+      if (pcRef.current) {
+        try {
+          pcRef.current.close();
+        } catch {}
+        pcRef.current = null;
+      }
 
       // Create peer connection
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });

@@ -68,7 +68,8 @@ export default function SenderPage() {
     [startStream, handleAnswer, addIceCandidate, facingMode, audioEnabled, presetKey],
   );
 
-  const wsUrl = roomId ? `wss://${serverHost}/ws` : '';
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = roomId ? `${wsProtocol}//${serverHost}/ws` : '';
 
   const { send } = useSignaling({
     wsUrl,

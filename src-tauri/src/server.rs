@@ -222,7 +222,16 @@ async fn handle_signaling(socket: WebSocket, state: ServerState) {
                 match msg_type.as_str() {
                     // ── Viewer creates a room ──────────────────────────────────────
                     "create-room" => {
-                        let id = Uuid::new_v4().to_string()[..6].to_uppercase().to_string();
+                        let id = if let Some(requested_id) = parsed.get("roomId").and_then(|v| v.as_str()) {
+                            let trimmed = requested_id.trim();
+                            if !trimmed.is_empty() {
+                                trimmed.to_uppercase()
+                            } else {
+                                Uuid::new_v4().to_string()[..6].to_uppercase().to_string()
+                            }
+                        } else {
+                            Uuid::new_v4().to_string()[..6].to_uppercase().to_string()
+                        };
                         let room_tx = state.get_or_create_room(&id);
 
                         current_room = Some(id.clone());
@@ -374,8 +383,7 @@ async fn handle_signaling(socket: WebSocket, state: ServerState) {
     if let Some(rid) = current_room {
         let r = current_role.unwrap_or_default();
         if r == "viewer" {
-            state.rooms.remove(&rid);
-            info!("Viewer disconnected — room closed: {}", rid);
+            info!("Viewer disconnected from room: {}", rid);
         } else if r == "sender" || r == "native-sender" {
             if let Some(room_tx) = state.rooms.get(&rid) {
                 let _ = room_tx.send(RoomMessage::Text {
